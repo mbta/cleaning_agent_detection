@@ -1,17 +1,22 @@
+import dataclasses
 import re
 import os
 import datetime
+import dataclasses
 from dataclasses import dataclass
+from dataclasses import field
 from typing import List
 from typing import Dict
 from typing import Any
 from typing import Tuple
 from typing import Union
+from typing import Iterator
 import pathlib
 import logging
 
 import csv
 from openpyxl import load_workbook
+from openpyxl import Workbook
 
 
 def check_file_path(filename: str) -> Tuple[bool, pathlib.Path]:
@@ -33,42 +38,13 @@ def check_file_path(filename: str) -> Tuple[bool, pathlib.Path]:
         valid_file = False
     return (valid_file, input_file)
 
-@dataclass
-class Metric:
-    """
-    holder dataclass for metrics information
-    """
-    true_positive: int = 0
-    false_positive: int = 0
-    false_negative: int = 0
-
-    def __str__(self):
-        label_len = 20
-        num_len = 10
-        len = label_len + num_len + 5
-        return (
-            f"{'*'*len}\n"
-            f"*{str.center('Results',len-2)}*\n"
-            f"{'*'*len}\n"
-            f"* {str.ljust('True Positive',label_len)}* {str.ljust(str(self.true_positive),num_len)}*\n"
-            f"* {str.ljust('False Positive',label_len)}* {str.ljust(str(self.false_positive),num_len)}*\n"
-            f"* {str.ljust('False Negative',label_len)}* {str.ljust(str(self.false_negative),num_len)}*\n"
-            f"{'*'*len}\n"
-        )
-
-    def as_list(self):
-        return [
-            ("Metric", "Count"),
-            ("True Positive", self.true_positive),
-            ("False Positive", self.false_positive),
-            ("False Negative", self.false_negative),
-        ]
 
 @dataclass
 class CleanRecord:
     """
     holder dataclass for cleaning / maintenance records
     """
+    id: str
     location: str
     zone: str
     title: str
@@ -102,6 +78,7 @@ def make_clean_record(record: List[str], column_lookups: Dict[str,int]):
     create CleanRecord object from spreadsheet row
     """
     return CleanRecord(
+        id=str(record[column_lookups["#"]]),
         location=str(record[column_lookups["Address"]]),
         zone=str(record[column_lookups["Zone"]]),
         title=str(record[column_lookups["Title"]]),
@@ -150,6 +127,85 @@ class AlertRecord:
         all lower case
         """
         self.zone = re.sub(r"[\W\d]","",self.location).lower()
+        if self.zone == "downtowncrossing":
+            self.zone = "dtx"
+
+
+@dataclass
+class Metric:
+    """
+    holder dataclass for metrics information
+    """
+    true_positive: List[Tuple[AlertRecord, CleanRecord]] = field(default_factory=list)
+    false_positive: List[AlertRecord] = field(default_factory=list)
+    false_negative: List[CleanRecord] = field(default_factory=list)
+
+    def __str__(self):
+        label_len = 20
+        num_len = 10
+        row_len = label_len + num_len + 5
+        return (
+            f"{'*'*row_len}\n"
+            f"*{str.center('Results',row_len-2)}*\n"
+            f"{'*'*row_len}\n"
+            f"* {str.ljust('True Positive',label_len)}* {str.ljust(str(len(self.true_positive)),num_len)}*\n"
+            f"* {str.ljust('False Positive',label_len)}* {str.ljust(str(len(self.false_positive)),num_len)}*\n"
+            f"* {str.ljust('False Negative',label_len)}* {str.ljust(str(len(self.false_negative)),num_len)}*\n"
+            f"{'*'*row_len}\n"
+        )
+
+    def get_table(self):
+        return [
+            ("Metric", "Count"),
+            ("True Positive", len(self.true_positive)),
+            ("False Positive", len(self.false_positive)),
+            ("False Negative", len(self.false_negative)),
+        ]
+
+    def true_positive_table(self):
+        return_table = [("Alert_Time","Cleaning_Time","Alert_Location","Cleaning_Location","Alert_ID","Cleaning_ID","Cleaning_Title","Zone","Elevator"),]
+        for record in self.true_positive:
+            alert = record[0]
+            clean = record[1]
+            return_table.append((
+                alert.dt,
+                clean.dt,
+                alert.location,
+                clean.location,
+                alert.id,
+                clean.id,
+                clean.title,
+                alert.zone,
+                alert.elevator,
+            ))
+        return return_table
+
+    def false_positive_table(self):
+        return_table = [("Time","Location","ID","Zone","Elevator"),]
+        for record in self.false_positive:
+            return_table.append((
+                record.dt,
+                record.location,
+                record.id,
+                record.zone,
+                record.elevator,
+            ))
+        return return_table
+
+    def false_negative_table(self):
+        return_table = [("Time","ID","Location","Title","Zone","Elevator"),]
+        for record in self.false_negative:
+            return_table.append((
+                record.dt,
+                record.id,
+                record.location,
+                record.title,
+                record.zone,
+                record.elevator,
+            ))
+        return return_table
+
+
 
 
 def make_alert_record(record: List[str], column_lookups: Dict[str,int]):
@@ -209,17 +265,16 @@ def get_header_index(headers_to_find: List[str], header_values: List[str]) -> Di
     return return_dict
 
 
-def get_elevator_records(record: CleanRecord, output: List[Dict]) -> None:
+def get_elevator_records(record: CleanRecord) -> Iterator[CleanRecord]:
     """
     explode cleaning record into invidual records if multiple elevators are 
     identified in location field
     """
-    if "elev" in record.location.lower():
-        elevator_numbers = re.findall(r"\d{3}", record.location)
-        # if no elevators found, empty list returned no records added to output
-        for elevator_number in elevator_numbers:
-            record.elevator = elevator_number
-            output.append(record)
+    # if "elev" in record.location.lower():
+    elevator_numbers = re.findall(r"\d{3}", record.location)
+    # if no elevators found, empty list returned no records added to output
+    for elevator_number in elevator_numbers:
+        yield dataclasses.replace(record, elevator=elevator_number)
 
 
 def check_data_headers(data: Union[list,dict], required_cols: List[str]):
@@ -334,8 +389,12 @@ def pull_sense_file() -> Tuple[List[AlertRecord], datetime.datetime, datetime.da
     # remove triplicate alerts
     new_data = [data[0],]
     for record in data[1:]:
-        if record.zone == new_data[-1].zone and record.elevator == new_data[-1].elevator and (record.dt - new_data[-1].dt).total_seconds() < 180:
+        time_diff = (record.dt - new_data[-1].dt).total_seconds()
+        # do not include alert if pervious alert has same id
+        # and occured within the last 6 minutes
+        if record.id == new_data[-1].id and time_diff <= 360 and time_diff > 0:
             continue
+
         if record.dt < min_dt:
             min_dt = record.dt
         if record.dt > max_dt:
@@ -357,6 +416,7 @@ def pull_clean_report_file(sensor_locations) -> Tuple[List[CleanRecord], datetim
     return list of records and min and max datetime of records
     """
     required_clean_columns = [
+        "#",
         "Title",
         "Address",
         "Created",
@@ -365,11 +425,18 @@ def pull_clean_report_file(sensor_locations) -> Tuple[List[CleanRecord], datetim
     (data, columns_lookup) = get_file_path("maintenance request", required_clean_columns)
     filtered_data = []
     for record in data[1:]:
+        # skip records with no valid data
+        if len(record) == record.count(None):
+            continue
+        
         record = make_clean_record(record, columns_lookup)
-        if (record.zone, record.elevator) in sensor_locations:
-            # get elevator cleaning records and explode records containing reference
-            # to more than one elevator
-            get_elevator_records(record, filtered_data)
+        for new_record in get_elevator_records(record):
+            # limit cleaning records to zones and elevators numbers found in
+            # alerts data
+            if (new_record.zone, new_record.elevator) in sensor_locations:
+                # get elevator cleaning records and explode records containing reference
+                # to more than one elevator
+                filtered_data.append(new_record)
 
     # get min and max cleaning data datetimes
     min_dt = datetime.datetime(year=3000,month=1, day=1)
@@ -389,13 +456,29 @@ def export_metrics(metrics: Metric) -> None:
     """
     if metrics counts exist, export metrics as csv file to home directory
     """
-    if metrics.true_positive + metrics.false_negative + metrics.false_positive == 0:
+    if len(metrics.true_positive) + len(metrics.false_negative) + len(metrics.false_positive) == 0:
         logging.info(f"No results to export.")
         return
 
-    filename = f"detect_cleaning_agent_metrics_{datetime.datetime.now().isoformat()}.csv"
+    filename = f"detect_cleaning_agent_metrics_{datetime.datetime.now().isoformat()}.xlsx"
     file_path = os.path.join(pathlib.Path.home(), filename)
-    with open(file_path, "w", newline="") as file_writer:
-        csv_writer = csv.writer(file_writer)
-        csv_writer.writerows(metrics.as_list())
+    wb = Workbook()
+    ws = wb.create_sheet(title="Metrics")
+    for row in metrics.get_table():
+        ws.append(row)
+
+    ws = wb.create_sheet(title="True_Positives")
+    for row in metrics.true_positive_table():
+        ws.append(row)
+
+    ws = wb.create_sheet(title="False_Positives")
+    for row in metrics.false_positive_table():
+        ws.append(row)
+
+    ws = wb.create_sheet(title="False_Negatives")
+    for row in metrics.false_negative_table():
+        ws.append(row)
+
+    wb.remove(wb['Sheet'])
+    wb.save(filename=file_path)
     logging.info(f"Wrote results file to: {file_path}")
